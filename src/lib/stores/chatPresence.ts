@@ -1,7 +1,9 @@
 import { writable } from 'svelte/store';
 import type { ChatMessage } from '../../app';
 
-export const socketStatus = writable<'connected' | 'disconnected' | 'server warming'>('disconnected');
+export const socketStatus = writable<
+	'connected' | 'disconnected' | 'server warming' | 'authenticating' | 'auth failed'
+>('disconnected');
 
 export const presenceStore = writable<Map<string, boolean>>(new Map());
 

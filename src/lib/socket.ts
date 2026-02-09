@@ -6,7 +6,7 @@ import type { ChatMessage } from '../app';
 import { playIncomingMessageSound } from './common/playSound';
 import { get } from 'svelte/store';
 
-export let socket;
+export let socket: ReturnType<typeof io>;
 try {
 	socket = io(SOCKET_ENDPOINT, {
 		withCredentials: true,
@@ -31,6 +31,10 @@ export function registerSocketListeners() {
 
 	socket.on('disconnect', () => {
 		socketStatus.set('disconnected');
+	});
+
+	socket.on('connect_error', () => {
+		socketStatus.set('auth failed');
 	});
 
 	socket.on('presence:snapshot', ({ users }: { users: { address: string; online: boolean }[] }) => {

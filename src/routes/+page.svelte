@@ -1,44 +1,107 @@
 <script lang="ts">
 	import { registerSocketListeners, socket } from '$lib/socket';
-	import { account } from '$lib/stores/walletStore';
+	import { account, walletActions } from '$lib/stores/walletStore';
+	import { AUTH_ENDPOINT } from '$lib/config/urlConfig';
 	import { ethers } from 'ethers';
 	import { messageStore, presenceStore, socketStatus } from '$lib/stores/chatPresence';
 	import { SendIcon } from 'lucide-svelte';
-	import { Progress } from '@skeletonlabs/skeleton-svelte';
 	import { playOutgoingMessageSound } from '$lib/common/playSound';
+	import { get } from 'svelte/store';
 
-	// Used to only register the socket registers once per address
-	let connectedOnce = $state(false);
 	// Contains the address that's selected via the online users
 	let activeChatWith: string | null = $state(null);
 	// Contains the current entered chat message
 	let currentMessage = $state('');
 	// A reference to the chat's textbox to perform scroll actions on message sent/recieved
 	let chatTextBox: HTMLElement;
+	let authenticatedAddress: string | null = $state(null);
+	let isAuthenticating = $state(false);
+	let authError: string | null = $state(null);
+	let hasRegisteredListeners = false;
 
-	// This could be enhanced to support the user switching wallets.
-	$effect(() => {
-		const address = $account?.address;
-		if (!address) return;
+	async function authenticateSocket(address: string) {
+		if (isAuthenticating) return;
+		isAuthenticating = true;
+		authError = null;
+		socketStatus.set('authenticating');
 
-		// update auth dynamically
-		socket.auth = { address };
+		try {
+			const walletProvider = await walletActions.getProvider();
+			if (!walletProvider) throw new Error('Wallet provider is unavailable');
 
-		// connect only once
-		if (!connectedOnce) {
-			registerSocketListeners();
+			const provider = new ethers.BrowserProvider(walletProvider);
+			const chainId = Number((await provider.getNetwork()).chainId);
+			const signer = await provider.getSigner();
+
+			const query = new URLSearchParams({ address, chainId: String(chainId) });
+			const nonceResponse = await fetch(`${AUTH_ENDPOINT}/auth/nonce?${query.toString()}`, {
+				credentials: 'include'
+			});
+
+			if (!nonceResponse.ok) {
+				throw new Error('Could not create a sign-in challenge');
+			}
+
+			const { typedData } = await nonceResponse.json();
+			const signature = await signer.signTypedData(typedData.domain, typedData.types, typedData.message);
+
+			socket.auth = {
+				address,
+				signature,
+				typedData: {
+					domain: typedData.domain,
+					message: typedData.message
+				}
+			};
+
+			if (!hasRegisteredListeners) {
+				registerSocketListeners();
+				hasRegisteredListeners = true;
+			}
+
+			if (socket.connected) {
+				socket.disconnect();
+			}
+
 			socket.connect();
-			connectedOnce = true;
+			authenticatedAddress = address.toLowerCase();
+		} catch (error) {
+			authenticatedAddress = null;
+			socket.disconnect();
+			socketStatus.set('auth failed');
+			authError = error instanceof Error ? error.message : 'Sign-in failed';
+		} finally {
+			isAuthenticating = false;
+		}
+	}
+
+	$effect(() => {
+		const rawAddress = $account?.address;
+		const connected = $account?.isConnected;
+		const normalizedAddress = rawAddress?.toLowerCase();
+
+		if (!rawAddress || !connected) {
+			authenticatedAddress = null;
+			authError = null;
+			activeChatWith = null;
+			socket.auth = {};
+			if (socket.connected) socket.disconnect();
+			socketStatus.set('disconnected');
+			messageStore.set(new Map());
+			presenceStore.set(new Map());
+			return;
 		}
 
-		console.log(`setup`);
+		if (normalizedAddress !== authenticatedAddress) {
+			void authenticateSocket(rawAddress);
+		}
 	});
 
 	/**
 	 * @summary Emits a message to the websocket server to another user
 	 */
 	function sendMessage() {
-		if (!activeChatWith || !currentMessage.trim()) return;
+		if (!activeChatWith || !currentMessage.trim() || get(socketStatus) !== 'connected') return;
 
 		socket.emit('dm:send', {
 			from: $account.address,
@@ -138,7 +201,7 @@
 			<div class="flex items-center justify-between">
 				<p class="text-xl font-extrabold">Connected Users</p>
 				<span class="text-sm text-surface-300">
-					{#if $account.isConnected && $socketStatus === 'connected'}
+				{#if $account.isConnected && $socketStatus === 'connected'}
 						{[...$presenceStore.values()].filter((v) => v === true).length}
 					{:else}
 						0
@@ -181,12 +244,18 @@
 						</button>
 					{/each}
 				</div>
-			{:else}
-				<div class="flex flex-1 items-center justify-center text-surface-300">
-					Connect a wallet to chat
-				</div>
-			{/if}
-		</div>
+				{:else}
+					<div class="flex flex-1 items-center justify-center text-surface-300">
+						{#if $account.isConnected && $socketStatus === 'authenticating'}
+							Waiting for signature...
+						{:else if $account.isConnected && $socketStatus === 'auth failed'}
+							Authentication failed{authError ? `: ${authError}` : ''}. Reconnect wallet and sign again.
+						{:else}
+							Connect wallet and sign to chat
+						{/if}
+					</div>
+				{/if}
+			</div>
 
 		<!-- Chat -->
 		<div
@@ -268,23 +337,23 @@
 					border border-primary-500 outline-none focus:border-0 focus:ring-0 focus:outline-none
 				"
 					>
-						<input
-							bind:value={currentMessage}
-							class="border-0 bg-transparent p-10 px-3 py-2 outline-none focus:border-0 focus:ring-0 focus:outline-none"
-							placeholder={activeChatWith ? 'Write a message…' : 'Choose a recipient...'}
-							onkeydown={onPromptKeydown}
-							disabled={!activeChatWith}
-						/>
+							<input
+								bind:value={currentMessage}
+								class="border-0 bg-transparent p-10 px-3 py-2 outline-none focus:border-0 focus:ring-0 focus:outline-none"
+								placeholder={activeChatWith ? 'Write a message…' : 'Choose a recipient...'}
+								onkeydown={onPromptKeydown}
+								disabled={!activeChatWith || $socketStatus !== 'connected'}
+							/>
 
 						<button
 							type="button"
-							class="
-						px-4 transition-colors
-						{currentMessage ? 'bg-primary-500 hover:bg-primary-400' : 'bg-surface-700'}
-					"
-							onclick={sendMessage}
-							disabled={!currentMessage}
-						>
+								class="
+							px-4 transition-colors
+							{currentMessage ? 'bg-primary-500 hover:bg-primary-400' : 'bg-surface-700'}
+						"
+								onclick={sendMessage}
+								disabled={!currentMessage || $socketStatus !== 'connected'}
+							>
 							<SendIcon />
 						</button>
 					</div>
