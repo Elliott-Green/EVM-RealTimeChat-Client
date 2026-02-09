@@ -33,7 +33,7 @@
 
 	async function disconnectWallet() {
 		await walletActions.disconnect();
-		socket.emit('disconnect');
+		socket.disconnect();
 	}
 </script>
 

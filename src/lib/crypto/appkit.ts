@@ -22,7 +22,6 @@ if (browser) {
 		defaultNetwork: baseSepolia,
 		projectId,
 		themeMode: 'light',
-		enableReconnect: true,
 		features: {
 			email: false,
 			socials: false,
